@@ -27,15 +27,15 @@ namespace PMX2FBX
             { "右ひじ",         HumanBodyBones.RightLowerArm },
             { "右手首",         HumanBodyBones.RightHand },
 
-            { "左足",           HumanBodyBones.LeftUpperLeg },
-            { "左ひざ",         HumanBodyBones.LeftLowerLeg },
-            { "左足首",         HumanBodyBones.LeftFoot },
-            { "左つま先",       HumanBodyBones.LeftToes },
+            { "左足D",           HumanBodyBones.LeftUpperLeg },
+            { "左ひざD",         HumanBodyBones.LeftLowerLeg },
+            { "左足首D",         HumanBodyBones.LeftFoot },
+            { "左足先EX",       HumanBodyBones.LeftToes },
 
-            { "右足",           HumanBodyBones.RightUpperLeg },
-            { "右ひざ",         HumanBodyBones.RightLowerLeg },
-            { "右足首",         HumanBodyBones.RightFoot },
-            { "右つま先",       HumanBodyBones.RightToes },
+            { "右足D",           HumanBodyBones.RightUpperLeg },
+            { "右ひざD",         HumanBodyBones.RightLowerLeg },
+            { "右足首D",         HumanBodyBones.RightFoot },
+            { "右足先EX",       HumanBodyBones.RightToes },
 
             { "左目",           HumanBodyBones.LeftEye },
             { "右目",           HumanBodyBones.RightEye },

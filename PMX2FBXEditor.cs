@@ -4,6 +4,7 @@ using System.IO;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using Autodesk.Fbx;
 #if VRC_SDK_VRCSDK3
 using VRC.SDK3.Avatars.Components;
 #endif
@@ -51,6 +52,10 @@ namespace PMX2FBX
             { "warn_readme", new[] { "*使用前请仔细阅读并遵循模型附带的ReadMe/使用规则文档", "※使用前にモデルに含まれるReadMe/使用規則ドキュメントを必ずご確認ください", "*사용 전에 모델에 포함된 ReadMe/사용 규칙 문서를 반드시 확인해 주세요", "*Please carefully read and follow the model's ReadMe/usage rules document before use" } },
             { "sec_log",     new[] { "日志",                "ログ",                  "로그",               "Log" } },
             { "lang_label",  new[] { "界面语言",            "インターフェース言語",   "인터페이스 언어",      "Interface Language" } },
+            { "opt_blend",   new[] { "写入空白 BlendShape", "空白BlendShapeを書き込む", "빈 BlendShape 쓰기", "Write Empty BlendShape" } },
+            { "opt_blend_tip",new[]{"在 FBX 中写入空的形态键通道，多用于VRChat声捕设置（推荐开启）", "FBXに空白の形態キー（Delta=0）を書き込み、VRChat音声キャプチャ設定等多用途（推奨）", "FBX에 빈 형태 키(Delt a=0) 쓰기, VRChat 음성 캡처 설정 등에 활용 (권장)", "Write empty morph channels (Delta=0) to FBX, commonly used for VRChat voice capture setup (recommended)" } },
+            { "blend_name",  new[] { "BlendShape 名称",    "BlendShape名",         "BlendShape 이름",     "BlendShape Name" } },
+            { "blend_mesh",  new[] { "目标网格名称（留空=全部）", "対象メッシュ名（空欄=全て）", "대상 메시 이름 (비움=전체)", "Target Mesh Name (empty=all)" } },
         };
 
         private string T(string key) => UI.TryGetValue(key, out var arr) ? arr[(int)_lang] : key;
@@ -64,6 +69,9 @@ namespace PMX2FBX
         bool    _addVRCComponent = false;
         bool    _autoHumanoidMap = true;
         int     _boneNameLang = 0;
+        bool    _addEmptyBlendShape = false;
+        string  _blendShapeName = "Blink";
+        string  _blendShapeMeshFilter = "";
 
         Vector2 _scroll;
         string  _log          = "";
@@ -241,6 +249,21 @@ namespace PMX2FBX
             GUILayout.Space(4);
             _addVRCComponent = DrawToggle(T("opt_vrc"), T("opt_vrc_tip"), _addVRCComponent);
             GUILayout.Space(4);
+            _addEmptyBlendShape = DrawToggle(T("opt_blend"), T("opt_blend_tip"), _addEmptyBlendShape);
+            if (_addEmptyBlendShape)
+            {
+                EditorGUI.indentLevel++;
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.Label(T("blend_name"), GUILayout.Width(EditorStyles.label.CalcSize(new GUIContent(T("blend_name"))).x + 4));
+                _blendShapeName = EditorGUILayout.TextField(_blendShapeName);
+                EditorGUILayout.EndHorizontal();
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.Label(T("blend_mesh"), GUILayout.Width(EditorStyles.label.CalcSize(new GUIContent(T("blend_mesh"))).x + 4));
+                _blendShapeMeshFilter = EditorGUILayout.TextField(_blendShapeMeshFilter);
+                EditorGUILayout.EndHorizontal();
+                EditorGUI.indentLevel--;
+            }
+            GUILayout.Space(4);
             DrawBoneLangSelector();
             GUILayout.EndVertical();
 
@@ -386,6 +409,12 @@ namespace PMX2FBX
 
                 long szKB = new FileInfo(outPath).Length / 1024;
                 Log($"✓ FBX 已写入：{ShortenPath(outPath)} ({szKB} KB)", "#4ADE80");
+
+                if (_addEmptyBlendShape)
+                {
+                    Log("写入空白 BlendShape…", "#94A3B8");
+                    AddEmptyBlendShapesToFbx(outPath);
+                }
 
                 string relPath = "";
                 if (outPath.StartsWith(projectRoot))
@@ -564,6 +593,116 @@ namespace PMX2FBX
                 }
                 EditorSceneManager.ClosePreviewScene(previewScene);
             }
+        }
+
+        void AddEmptyBlendShapesToFbx(string fbxAbsPath)
+        {
+            if (!File.Exists(fbxAbsPath)) return;
+
+            using (var manager = FbxManager.Create())
+            {
+                var ioSettings = FbxIOSettings.Create(manager, Globals.IOSROOT);
+                manager.SetIOSettings(ioSettings);
+
+                using (var importer = FbxImporter.Create(manager, "importer"))
+                {
+                    if (!importer.Initialize(fbxAbsPath, -1, manager.GetIOSettings())) return;
+
+                    int fileFormat = DetectWriterFormat(manager, fbxAbsPath);
+                    using (var scene = FbxScene.Create(manager, "scene"))
+                    {
+                        importer.Import(scene);
+                        importer.Destroy();
+
+                        int meshCount = 0, channelAdded = 0;
+                        var root = scene.GetRootNode();
+                        if (root != null)
+                            ProcessNodeRecursive(scene, root, ref meshCount, ref channelAdded);
+
+                        if (channelAdded > 0)
+                        {
+                            using (var exporter = FbxExporter.Create(manager, "exporter"))
+                            {
+                                exporter.Initialize(fbxAbsPath, fileFormat, manager.GetIOSettings());
+                                exporter.Export(scene);
+                            }
+                        }
+
+                        if (channelAdded > 0)
+                            Log($"✓ 空白 BlendShape \"{_blendShapeName}\" 已写入 ({channelAdded} 个网格)", "#4ADE80");
+                    }
+                }
+            }
+        }
+
+        int DetectWriterFormat(FbxManager manager, string path)
+        {
+            bool isBinary = false;
+            try
+            {
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
+                using var br = new BinaryReader(fs);
+                string header = System.Text.Encoding.ASCII.GetString(br.ReadBytes(20));
+                isBinary = header.StartsWith("Kaydara FBX Binary");
+            }
+            catch { isBinary = true; }
+
+            var registry = manager.GetIOPluginRegistry();
+            return isBinary
+                ? registry.FindWriterIDByDescription("FBX binary (*.fbx)")
+                : registry.FindWriterIDByDescription("FBX ascii (*.fbx)");
+        }
+
+        void ProcessNodeRecursive(FbxScene scene, FbxNode node, ref int meshCount, ref int channelAdded)
+        {
+            var attr = node.GetNodeAttribute();
+            if (attr != null && attr.GetAttributeType() == FbxNodeAttribute.EType.eMesh)
+            {
+                var mesh = node.GetMesh();
+                if (mesh != null)
+                {
+                    meshCount++;
+                    bool match = string.IsNullOrEmpty(_blendShapeMeshFilter)
+                        || node.GetName() == _blendShapeMeshFilter
+                        || mesh.GetName() == _blendShapeMeshFilter;
+                    if (match && AddEmptyBlendShapeToMesh(scene, mesh))
+                        channelAdded++;
+                }
+            }
+            for (int i = 0; i < node.GetChildCount(); i++)
+                ProcessNodeRecursive(scene, node.GetChild(i), ref meshCount, ref channelAdded);
+        }
+
+        bool AddEmptyBlendShapeToMesh(FbxScene scene, FbxMesh mesh)
+        {
+            int count = mesh.GetControlPointsCount();
+            if (count <= 0) return false;
+
+            FbxBlendShape blendShape = null;
+            int dc = mesh.GetDeformerCount(FbxDeformer.EDeformerType.eBlendShape);
+            if (dc > 0) blendShape = mesh.GetBlendShapeDeformer(0);
+
+            if (blendShape == null)
+            {
+                blendShape = FbxBlendShape.Create(scene, mesh.GetName() + "_BlendShapes");
+                mesh.AddDeformer(blendShape);
+            }
+
+            for (int i = 0; i < blendShape.GetBlendShapeChannelCount(); i++)
+            {
+                var ch = blendShape.GetBlendShapeChannel(i);
+                if (ch != null && ch.GetName() == _blendShapeName) return false;
+            }
+
+            var channel = FbxBlendShapeChannel.Create(scene, _blendShapeName);
+            var shape = FbxShape.Create(scene, _blendShapeName + "_Shape");
+            shape.InitControlPoints(count);
+            for (int i = 0; i < count; i++)
+                shape.SetControlPointAt(mesh.GetControlPointAt(i), i);
+
+            channel.AddTargetShape(shape, 100.0);
+            blendShape.AddBlendShapeChannel(channel);
+            return true;
         }
     }
 }
