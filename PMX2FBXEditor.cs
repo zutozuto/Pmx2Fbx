@@ -226,8 +226,10 @@ namespace PMX2FBX
                 string p = EditorUtility.OpenFolderPanel("Select Output Folder", _outputDir, "");
                 if (!string.IsNullOrEmpty(p))
                 {
-                    string proj = Path.GetDirectoryName(Application.dataPath);
-                    if (p.StartsWith(proj)) p = p.Substring(proj.Length + 1);
+                    string proj = Path.GetFullPath(Path.GetDirectoryName(Application.dataPath) ?? "");
+                    string pNorm = Path.GetFullPath(p);
+                    if (!string.IsNullOrEmpty(proj) && pNorm.StartsWith(proj, StringComparison.OrdinalIgnoreCase))
+                        p = pNorm.Substring(proj.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
                     _outputDir = p;
                 }
             }
@@ -344,11 +346,11 @@ namespace PMX2FBX
                 Log($"✓ 顶点: {pmx.Positions.Length}  三角面: {pmx.Faces.Length / 3}", "#4ADE80");
                 Log($"  材质: {pmx.Materials.Length}  骨骼: {pmx.Bones.Length}  BlendShape: {CountVMorphs(pmx)}", "#94A3B8");
 
-                string projectRoot = Path.GetDirectoryName(Application.dataPath) ?? "";
-                bool outputInProject = _outputDir.StartsWith("Assets");
+                string projectRoot = Path.GetFullPath(Path.GetDirectoryName(Application.dataPath) ?? "");
+                bool outputInProject = _outputDir.StartsWith("Assets", StringComparison.OrdinalIgnoreCase);
                 string absOut = outputInProject
                     ? Path.GetFullPath(Path.Combine(projectRoot, _outputDir))
-                    : _outputDir;
+                    : Path.GetFullPath(_outputDir);
                 if (outputInProject) Directory.CreateDirectory(absOut);
 
                 var texPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -413,17 +415,19 @@ namespace PMX2FBX
                 if (_addEmptyBlendShape)
                 {
                     Log("写入空白 BlendShape…", "#94A3B8");
-                    AddEmptyBlendShapesToFbx(outPath);
+                    try { AddEmptyBlendShapesToFbx(outPath); }
+                    catch (Exception bsex) { Log($"⚠ 写入空白 BlendShape 失败（已跳过）：{bsex.Message}", "#FAC775"); }
                 }
 
                 string relPath = "";
-                if (outPath.StartsWith(projectRoot))
+                if (!string.IsNullOrEmpty(projectRoot) &&
+                    Path.GetFullPath(outPath).StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
                 {
                     Log("刷新 AssetDatabase…", "#94A3B8");
                     AssetDatabase.Refresh();
 
                     // 提取材质从 FBX 到 Materials 文件夹
-                    relPath = outPath.Substring(projectRoot.Length + 1).Replace(Path.DirectorySeparatorChar, '/');
+                    relPath = Path.GetFullPath(outPath).Substring(projectRoot.Length + 1).Replace(Path.DirectorySeparatorChar, '/');
                     var importer = AssetImporter.GetAtPath(relPath) as ModelImporter;
                     if (importer != null)
                     {
@@ -440,17 +444,34 @@ namespace PMX2FBX
                             importer2.animationType = ModelImporterAnimationType.Human;
                             if (_autoHumanoidMap)
                             {
-                                if (PMXHumanoidMapper.ApplyMapping(relPath, out string humanReason, out int humanHits))
+                                if (PMXHumanoidMapper.ApplyMapping(relPath, out string humanReason, out int humanHits, out var missingBones))
                                 {
-                                    Log($"✓ Humanoid骨骼自动映射: {humanHits}/{PMXHumanoidMapper.RuleCount}", "#4ADE80");
+                                    if (missingBones != null && missingBones.Count > 0)
+                                    {
+                                        Log($"  ⚠ Humanoid 部分匹配: {humanHits}/{PMXHumanoidMapper.RuleCount}，缺失 {missingBones.Count} 项", "#FAC775");
+                                        EditorUtility.DisplayDialog(
+                                            "Humanoid 骨骼未完全匹配",
+                                            $"匹配到 {humanHits}/{PMXHumanoidMapper.RuleCount} 个骨骼。\n" +
+                                            $"以下骨骼未在模型中找到：\n\n• {string.Join("\n• ", missingBones)}\n\n" +
+                                            $"已尽量按『基础名 → D 系 → EX/IK』的优先级匹配（基本名优先）。如仍缺失，确认模型骨骼命名是否使用 PMX 日文名。",
+                                            "知道了");
+                                    }
+                                    else
+                                    {
+                                        Log($"✓ Humanoid骨骼自动映射: {humanHits}/{PMXHumanoidMapper.RuleCount}", "#4ADE80");
+                                    }
                                 }
                                 else
                                 {
                                     Log($"  ⚠ Humanoid映射跳过: {humanReason}", "#FAC775");
+                                    EditorUtility.DisplayDialog(
+                                        "Humanoid 骨骼映射失败",
+                                        $"映射未应用（0 个匹配）。\n\n原因：\n{humanReason}\n\n" +
+                                        $"请确认模型使用的是 PMX 日文骨骼命名（腰 / 左足 / 左ひざ…）。",
+                                        "知道了");
                                 }
-                            }
 
-                            importer2.avatarSetup = ModelImporterAvatarSetup.CreateFromThisModel;
+                            }
                             importer2.SaveAndReimport();
                         }
 
@@ -513,8 +534,9 @@ namespace PMX2FBX
             string prefabFolder = Path.Combine(absOut, "Prefabs");
             if (!AssetDatabase.IsValidFolder(prefabFolder))
             {
-                string projectPath = Path.GetDirectoryName(Application.dataPath) ?? "";
-                string parentFolder = absOut.Substring(projectPath.Length + 1);
+                string projectPath = Path.GetFullPath(Path.GetDirectoryName(Application.dataPath) ?? "");
+                string absOutFull = Path.GetFullPath(absOut);
+                string parentFolder = absOutFull.Substring(projectPath.Length + 1).Replace(Path.DirectorySeparatorChar, '/');
                 AssetDatabase.CreateFolder(parentFolder, "Prefabs");
             }
 
@@ -599,39 +621,62 @@ namespace PMX2FBX
         {
             if (!File.Exists(fbxAbsPath)) return;
 
-            using (var manager = FbxManager.Create())
+            var manager = FbxManager.Create();
+            FbxIOSettings ioSettings = null;
+            FbxImporter importer = null;
+            FbxScene scene = null;
+            FbxExporter exporter = null;
+
+            try
             {
-                var ioSettings = FbxIOSettings.Create(manager, Globals.IOSROOT);
+                ioSettings = FbxIOSettings.Create(manager, Globals.IOSROOT);
                 manager.SetIOSettings(ioSettings);
 
-                using (var importer = FbxImporter.Create(manager, "importer"))
+                importer = FbxImporter.Create(manager, "importer");
+                if (!importer.Initialize(fbxAbsPath, -1, manager.GetIOSettings()))
                 {
-                    if (!importer.Initialize(fbxAbsPath, -1, manager.GetIOSettings())) return;
-
-                    int fileFormat = DetectWriterFormat(manager, fbxAbsPath);
-                    using (var scene = FbxScene.Create(manager, "scene"))
-                    {
-                        importer.Import(scene);
-                        importer.Destroy();
-
-                        int meshCount = 0, channelAdded = 0;
-                        var root = scene.GetRootNode();
-                        if (root != null)
-                            ProcessNodeRecursive(scene, root, ref meshCount, ref channelAdded);
-
-                        if (channelAdded > 0)
-                        {
-                            using (var exporter = FbxExporter.Create(manager, "exporter"))
-                            {
-                                exporter.Initialize(fbxAbsPath, fileFormat, manager.GetIOSettings());
-                                exporter.Export(scene);
-                            }
-                        }
-
-                        if (channelAdded > 0)
-                            Log($"✓ 空白 BlendShape \"{_blendShapeName}\" 已写入 ({channelAdded} 个网格)", "#4ADE80");
-                    }
+                    Debug.LogWarning($"[PMX2FBX] FBX Initialize 失败，跳过写入空白 BlendShape: {importer.GetStatus().GetErrorString()}");
+                    return;
                 }
+
+                int fileFormat = DetectWriterFormat(manager, fbxAbsPath);
+                scene = FbxScene.Create(manager, "scene");
+                importer.Import(scene);
+                importer.Destroy();
+                importer = null;
+
+                int meshCount = 0, channelAdded = 0;
+                var root = scene.GetRootNode();
+                if (root != null)
+                    ProcessNodeRecursive(scene, root, ref meshCount, ref channelAdded);
+
+                if (channelAdded > 0)
+                {
+                    exporter = FbxExporter.Create(manager, "exporter");
+                    if (!exporter.Initialize(fbxAbsPath, fileFormat, manager.GetIOSettings()))
+                    {
+                        Debug.LogWarning($"[PMX2FBX] FBX 导出初始化失败，跳过写入空白 BlendShape: {exporter.GetStatus().GetErrorString()}");
+                    }
+                    else
+                    {
+                        exporter.Export(scene);
+                    }
+                    exporter.Destroy();
+                    exporter = null;
+                    Log($"✓ 空白 BlendShape \"{_blendShapeName}\" 已写入 ({channelAdded} 个网格)", "#4ADE80");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[PMX2FBX] AddEmptyBlendShapesToFbx 失败: {ex.Message}");
+            }
+            finally
+            {
+                if (importer != null) importer.Destroy();
+                if (scene != null) scene.Destroy();
+                if (exporter != null) exporter.Destroy();
+                if (ioSettings != null) ioSettings.Destroy();
+                manager.Destroy();
             }
         }
 
@@ -706,3 +751,4 @@ namespace PMX2FBX
         }
     }
 }
+
